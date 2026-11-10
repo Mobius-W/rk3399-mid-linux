@@ -4,13 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       kernel_ref:
-        description: "内核版本（kernel.org v6.x 目录下的版本号，例如 6.12）"
+        description: "内核版本（例如 6.12）"
         required: false
         default: "6.12"
-      fragment:
-        description: "内核配置片段"
-        required: false
-        default: "linux/config.m1.fragment"
   push:
     paths:
       - "linux/**"
@@ -20,7 +16,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: defconfig-m1
+            base: defconfig
+            fragment: linux/config.m1.fragment
+          - name: allnoconfig-min
+            base: allnoconfig
+            fragment: linux/config.min.fragment
 
     steps:
       - uses: actions/checkout@v4
@@ -45,13 +51,10 @@ jobs:
           curl -sSL -o bb.apk "$DIR$APK"
           rm -rf bbroot && mkdir -p bbroot
           tar -xzf bb.apk -C bbroot 2>/dev/null || tar -xf bb.apk -C bbroot
-          find bbroot -type f | head -20
           BB=$(find bbroot -type f -name 'busybox*' | head -1)
-          echo "BB=$BB"
           cp "$BB" busybox.arm64
           chmod +x busybox.arm64
           file busybox.arm64
-          ./busybox.arm64 2>/dev/null | head -2 || true
 
       - name: Assemble initramfs
         run: |
@@ -82,16 +85,20 @@ jobs:
           cp linux/rk3399-mid.dts "$D/rk3399-mid.dts"
           echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-mid.dtb' >> "$D/Makefile"
 
-      - name: Configure
+      - name: Configure (${{ matrix.base }})
         run: |
           set -euo pipefail
-          FRAG="${{ github.event.inputs.fragment || 'linux/config.m1.fragment' }}"
-          echo "使用配置片段: $FRAG"
+          echo "变体 = ${{ matrix.name }} / base = ${{ matrix.base }} / frag = ${{ matrix.fragment }}"
           cd ksrc
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-          scripts/kconfig/merge_config.sh -m .config "$GITHUB_WORKSPACE/$FRAG"
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- "${{ matrix.base }}"
+          scripts/kconfig/merge_config.sh -m .config "$GITHUB_WORKSPACE/${{ matrix.fragment }}"
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          grep -E "CONFIG_DWMAC_ROCKCHIP|CONFIG_MMC_SDHCI_OF_ARASAN|CONFIG_SERIAL_8250_DW|CONFIG_DRM=|CONFIG_SOUND=" .config
+          echo "=== 关键项核对 ==="
+          for s in ARCH_ROCKCHIP CLK_RK3399 DWMAC_ROCKCHIP MMC_SDHCI_OF_ARASAN \
+                   SERIAL_8250_DW DRM SOUND MODULES BLK_DEV_INITRD DEVTMPFS \
+                   DEBUG_INFO KALLSYMS; do
+            printf '%-26s %s\n' "$s" "$(grep -E "^CONFIG_${s}=|^# CONFIG_${s} is not set" .config || echo '<缺失>')"
+          done
 
       - name: Build kernel + dtbs
         run: |
@@ -103,7 +110,27 @@ jobs:
           echo "Image = $IZ B ($((IZ/1048576)) MiB)"
           echo "DTB   = $DZ B"
           echo "boot 分区 = 32 MiB -> 预算 30 MiB"
-          awk -v iz="$IZ" 'BEGIN{ if (iz > 30*1048576) print "::warning::Image 超预算，需要继续瘦身" }'
+          awk -v iz="$IZ" 'BEGIN{ if (iz > 30*1048576) print "::warning::Image 超预算" }'
+
+      # ---------- 体积归因（本次新增的重点）----------
+      - name: Size attribution
+        run: |
+          set -euo pipefail
+          cd ksrc
+          echo "########## vmlinux 段体积 ##########"
+          aarch64-linux-gnu-size -A vmlinux 2>/dev/null | sort -k2 -nr | head -20 || true
+          echo
+          echo "########## 按子系统统计 built-in.a 体积（前 20）##########"
+          find . -name 'built-in.a' -not -path './tools/*' -printf '%h\n' 2>/dev/null \
+            | sed 's|^\./||' | cut -d/ -f1-3 | sort -u \
+            | while read -r d; do
+                b=$(find "$d" -maxdepth 5 -name 'built-in.a' -exec du -cb {} + 2>/dev/null | tail -1 | cut -f1)
+                [ -n "${b:-}" ] && echo "$b $d"
+              done | sort -nr | head -20 \
+            | awk '{printf "%8.2f MiB  %s\n", $1/1048576, $2}'
+          echo
+          echo "########## 最大的 40 个符号 ##########"
+          aarch64-linux-gnu-nm --print-size --size-sort --radix=d vmlinux 2>/dev/null | tail -40 || true
 
       - name: Pack boot.img
         run: |
@@ -118,10 +145,11 @@ jobs:
           cp ksrc/arch/arm64/boot/Image out/Image
           cp ksrc/arch/arm64/boot/dts/rockchip/rk3399-mid.dtb out/rk3399-mid.dtb
           cp initramfs.cpio.gz out/initramfs.cpio.gz
+          cp ksrc/.config "out/config.${{ matrix.name }}"
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS && ls -l
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rk3399-mid-linux
+          name: linux-${{ matrix.name }}
           path: out/*
           if-no-files-found: error
