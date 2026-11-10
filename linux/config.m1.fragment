@@ -74,7 +74,6 @@ CONFIG_SYSFS=y
 
 # ---- 体积大刀（里程碑 1 专用）----
 # 关掉模块支持 = 所有 tristate=m 的驱动全部丢弃，Image 大幅缩小
-# CONFIG_MODULES is not set
 # CONFIG_FTRACE is not set
 # CONFIG_KALLSYMS_ALL is not set
 # CONFIG_BPF_SYSCALL is not set
@@ -84,3 +83,28 @@ CONFIG_SYSFS=y
 # CONFIG_NETWORK_FILESYSTEMS is not set
 # CONFIG_DEBUG_INFO is not set
 # CONFIG_DEBUG_INFO_BTF is not set
+
+# ---- 体积二刀：追踪/BFP/安全栈/网络栈 ----
+# CONFIG_FUNCTION_TRACER is not set
+# CONFIG_KPROBES is not set
+# CONFIG_UPROBES is not set
+# CONFIG_PERF_EVENTS is not set
+# CONFIG_SECURITY is not set
+# CONFIG_INTEGRITY is not set
+# CONFIG_KEYS is not set
+# CONFIG_AUDIT is not set
+# CONFIG_MISC_FILESYSTEMS is not set
+# CONFIG_SQUASHFS is not set
+# CONFIG_QUOTA is not set
+# CONFIG_CGROUP_SCHED is not set
+# CONFIG_PSI is not set
+# CONFIG_XFRM_USER is not set
+# CONFIG_INET_DIAG is not set
+# CONFIG_PACKET_DIAG is not set
+# CONFIG_UNIX_DIAG is not set
+# CONFIG_DNS_RESOLVER is not set
+# CONFIG_CRYPTO_USER is not set
+# CONFIG_CRYPTO_HASH_INFO is not set
+# CONFIG_ASYMMETRIC_KEY_TYPE is not set
+# CONFIG_SYSTEM_TRUSTED_KEYRING is not set
+# CONFIG_MODULE_SIG is not set
