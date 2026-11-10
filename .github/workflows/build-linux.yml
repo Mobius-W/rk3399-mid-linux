@@ -27,7 +27,7 @@ jobs:
           sudo apt-get -q install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
             device-tree-compiler cpio xz-utils curl ca-certificates \
-            aarch64-linux-gnu-gcc
+            gcc-aarch64-linux-gnu
           aarch64-linux-gnu-gcc --version | head -1
 
       - name: Fetch kernel
