@@ -7,6 +7,10 @@ on:
         description: "内核版本（kernel.org v6.x 目录下的版本号，例如 6.12）"
         required: false
         default: "6.12"
+      fragment:
+        description: "内核配置片段"
+        required: false
+        default: "linux/config.m1.fragment"
   push:
     paths:
       - "linux/**"
@@ -26,45 +30,11 @@ jobs:
           sudo apt-get -q update
           sudo apt-get -q install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
-            device-tree-compiler cpio xz-utils curl ca-certificates \
-            gcc-aarch64-linux-gnu
+            device-tree-compiler cpio xz-utils curl ca-certificates file \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           aarch64-linux-gnu-gcc --version | head -1
 
-      - name: Fetch kernel
-        run: |
-          set -euo pipefail
-          KREF="${{ github.event.inputs.kernel_ref || '6.12' }}"
-          echo "KREF=$KREF" >> $GITHUB_ENV
-          curl -sSL --retry 3 -o linux.tar.xz \
-            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KREF}.tar.xz"
-          ls -l linux.tar.xz
-          tar xf linux.tar.xz
-          mv "linux-${KREF}" ksrc
-          cd ksrc && head -5 Makefile
-
-      - name: Apply board DTS
-        run: |
-          set -euo pipefail
-          D=ksrc/arch/arm64/boot/dts/rockchip
-          cp linux/rk3399-mid.dts "$D/rk3399-mid.dts"
-          echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-mid.dtb' >> "$D/Makefile"
-
-      - name: Configure
-        run: |
-          set -euo pipefail
-          cd ksrc
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-          scripts/kconfig/merge_config.sh -m .config "$GITHUB_WORKSPACE/linux/config.fragment"
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          grep -E "CONFIG_DWMAC_ROCKCHIP|CONFIG_MMC_SDHCI_OF_ARASAN|CONFIG_DRM_ROCKCHIP|CONFIG_SERIAL_8250_DW" .config
-
-      - name: Build kernel + dtbs
-        run: |
-          set -euo pipefail
-          cd ksrc
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image dtbs 2>&1 | tail -40
-          ls -l arch/arm64/boot/Image arch/arm64/boot/dts/rockchip/rk3399-mid.dtb
-
+      # ---------- 先做快的：busybox + initramfs ----------
       - name: Build static busybox
         run: |
           set -euo pipefail
@@ -73,8 +43,8 @@ jobs:
           cd busybox-1.36.1
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
           sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          grep '^CONFIG_STATIC=y' .config
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" 2>&1 | tail -20
+          grep -q '^CONFIG_STATIC=y' .config || { echo "STATIC 未启用"; exit 1; }
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" 2>&1 | tail -15
           file busybox
 
       - name: Assemble initramfs
@@ -87,6 +57,47 @@ jobs:
           chmod +x irfs/init irfs/bin/udhcpc.script
           ( cd irfs && find . | cpio -o -H newc --owner=0:0 --reproducible 2>/dev/null | gzip -9 ) > initramfs.cpio.gz
           ls -l initramfs.cpio.gz
+
+      # ---------- 内核 ----------
+      - name: Fetch kernel
+        run: |
+          set -euo pipefail
+          KREF="${{ github.event.inputs.kernel_ref || '6.12' }}"
+          curl -sSL --retry 3 -o linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KREF}.tar.xz"
+          ls -l linux.tar.xz
+          tar xf linux.tar.xz
+          mv "linux-${KREF}" ksrc
+
+      - name: Apply board DTS
+        run: |
+          set -euo pipefail
+          D=ksrc/arch/arm64/boot/dts/rockchip
+          cp linux/rk3399-mid.dts "$D/rk3399-mid.dts"
+          echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-mid.dtb' >> "$D/Makefile"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          FRAG="${{ github.event.inputs.fragment || 'linux/config.m1.fragment' }}"
+          echo "使用配置片段: $FRAG"
+          cd ksrc
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          scripts/kconfig/merge_config.sh -m .config "$GITHUB_WORKSPACE/$FRAG"
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep -E "CONFIG_DWMAC_ROCKCHIP|CONFIG_MMC_SDHCI_OF_ARASAN|CONFIG_SERIAL_8250_DW|CONFIG_DRM=|CONFIG_SOUND=" .config
+
+      - name: Build kernel + dtbs
+        run: |
+          set -euo pipefail
+          cd ksrc
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image dtbs 2>&1 | tail -30
+          IZ=$(stat -c%s arch/arm64/boot/Image)
+          DZ=$(stat -c%s arch/arm64/boot/dts/rockchip/rk3399-mid.dtb)
+          echo "Image = $IZ B ($((IZ/1048576)) MiB)"
+          echo "DTB   = $DZ B"
+          echo "boot 分区 = 32 MiB -> 预算 30 MiB"
+          awk -v iz="$IZ" 'BEGIN{ if (iz > 30*1048576) print "::warning::Image 超预算，需要继续瘦身" }'
 
       - name: Pack boot.img
         run: |
