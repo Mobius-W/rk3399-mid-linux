@@ -1,64 +1,81 @@
 #!/bin/sh
 # RK3399 MID — 无 TTL 探路 initramfs
-# 目的：内核一起来就通过以太网自播报 + 开 telnet 不依赖串口
+# 目标：内核一起来就靠以太网自报家门 + 开 telnet，完全不依赖串口
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 /bin/busybox --install -s /bin 2>/dev/null
 
 mount -t proc     proc     /proc        2>/dev/null
 mount -t sysfs    sysfs    /sys         2>/dev/null
 mount -t devtmpfs devtmpfs /dev         2>/dev/null
-mkdir -p /dev/pts /tmp /run /root
+mkdir -p /dev/pts /tmp /run /root /etc
 mount -t devpts   devpts   /dev/pts     2>/dev/null
+hostname rk3399-mid 2>/dev/null
 
-BEACON=10.26.88.11
+BEACON_HOST=10.26.88.11
+BEACON_BCAST=10.26.88.255
 PORT=9999
+STATIC_IP=10.26.88.150/24
+GW=10.26.88.1
 
-{
-  echo "=== RK3399 MID initramfs ==="
-  uname -a
-  echo "--- cmdline ---"
-  cat /proc/cmdline
-  echo "--- block ---"
-  ls /dev/mmcblk* 2>/dev/null
-  cat /proc/partitions
-  echo "--- net ---"
-  ls /sys/class/net
-} > /tmp/boot.txt 2>&1
-cat /tmp/boot.txt > /dev/console 2>/dev/null
-cat /tmp/boot.txt > /dev/ttyS2 2>/dev/null
+report() {
+  {
+    echo "=== RK3399 MID initramfs @ $(date 2>/dev/null || echo boot) ==="
+    uname -a
+    echo "--- cmdline ---";   cat /proc/cmdline
+    echo "--- compat ---";    tr -d '\0' < /proc/device-tree/compatible 2>/dev/null; echo
+    echo "--- model ---";     tr -d '\0' < /proc/device-tree/model 2>/dev/null; echo
+    echo "--- block ---";     ls -l /dev/mmcblk* 2>/dev/null; cat /proc/partitions
+    echo "--- net ---";       ls /sys/class/net
+    echo "--- ip ---";        ip -4 -o addr 2>/dev/null || ifconfig -a 2>/dev/null
+    echo "--- dmesg(tail) ---"; dmesg 2>/dev/null | tail -40
+  } > /tmp/boot.txt 2>&1
+  cat /tmp/boot.txt > /dev/console 2>/dev/null
+  cat /tmp/boot.txt > /dev/ttyS2 2>/dev/null
+}
 
-# ---- 网络 ----
-if [ -e /sys/class/net/eth0 ]; then
-  ip link set eth0 up 2>/dev/null
-  for i in 1 2 3 4 5 6 7 8; do
-    udhcpc -i eth0 -n -q -t 3 -T 3 -s /bin/udhcpc.script && break
+report
+
+# ---------------- 网络 ----------------
+IF=eth0
+if [ -e /sys/class/net/$IF ]; then
+  ip link set $IF up 2>/dev/null
+  for i in 1 2 3 4; do
+    udhcpc -i $IF -n -q -t 3 -T 3 -s /bin/udhcpc.script >/dev/null 2>&1 && break
     sleep 2
   done
+  # DHCP 拿不到就上静态地址，保证一定能发声
+  if ! ip -4 -o addr show $IF 2>/dev/null | grep -q 'inet '; then
+    echo "DHCP 失败 -> 静态 $STATIC_IP"
+    ip addr add $STATIC_IP dev $IF 2>/dev/null
+    ip link set $IF up 2>/dev/null
+    ip route add default via $GW dev $IF 2>/dev/null
+  fi
+  ip -4 -o addr show $IF
 fi
 
-# ---- UDP 自播报（外网也能看到它活没活）----
+# ---------------- 自播报（UDP，单播 + 广播各一份）----------------
 (
   while true; do
-    IP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}')
-    MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
+    IP=$(ip -4 -o addr show $IF 2>/dev/null | awk '{print $4}' | head -1)
+    MAC=$(cat /sys/class/net/$IF/address 2>/dev/null)
     BLK=$(ls /dev/mmcblk* 2>/dev/null | tr '\n' ',')
     K=$(uname -r)
-    printf 'RK3399MID|ip=%s|mac=%s|k=%s|blk=%s\n' "$IP" "$MAC" "$K" "$BLK" \
-      | nc -u -w 1 "$BEACON" "$PORT" 2>/dev/null
+    MSG=$(printf 'RK3399MID|ip=%s|mac=%s|k=%s|blk=%s' "$IP" "$MAC" "$K" "$BLK")
+    printf '%s\n' "$MSG" | nc -u -w 1 "$BEACON_HOST" "$PORT" 2>/dev/null
+    printf '%s\n' "$MSG" | nc -u -w 1 "$BEACON_BCAST" "$PORT" 2>/dev/null
     sleep 3
   done
 ) &
 
-# ---- telnet 后台（22/telnet 23）----
-telnetd -l /bin/sh -p 23 2>/dev/null &
+# ---------------- telnet 后台 ----------------
+telnetd -l /bin/sh -p 23   2>/dev/null &
 telnetd -l /bin/sh -p 2323 2>/dev/null &
 
-# ---- 串口 shell（万一 TTL 接了也能用）----
+# ---------------- 串口 shell（万一接了 TTL）----------------
 if [ -c /dev/ttyS2 ]; then
   setsid sh -c 'exec sh </dev/ttyS2 >/dev/ttyS2 2>&1' &
 fi
 
-echo "*** RK3399 MID: netconsole ready, telnet on 23, beacon -> $BEACON:$PORT ***" > /dev/console
+echo "*** RK3399 MID: 活着。telnet 23 / beacon -> $BEACON_HOST:$PORT ***" > /dev/console
 
-# 前台留一个 shell，方便后续改成 switch_root
 exec sh
