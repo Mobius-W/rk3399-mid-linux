@@ -9,7 +9,7 @@ import argparse
 import hashlib
 import struct
 
-PAGE = 2048
+PAGE = 16384  # RK vendor boot.img 用 16KB 页，保持一致
 
 
 def pad(data: bytes, page: int = PAGE) -> bytes:
