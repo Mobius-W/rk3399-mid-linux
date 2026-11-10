@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get -q update
           sudo apt-get -q install -y --no-install-recommends \
-            build-essential bison flex libssl-dev swig bc \
+            build-essential bison flex libssl-dev libgnutls28-dev uuid-dev swig bc \
             device-tree-compiler python3-setuptools python3-pyelftools \
             gcc-aarch64-linux-gnu
           aarch64-linux-gnu-gcc --version | head -1
@@ -72,23 +72,22 @@ jobs:
       - name: Build
         working-directory: uboot-src
         run: |
+          set -o pipefail
           make ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- \
                BL31="$GITHUB_WORKSPACE/blobs/bl31.elf" \
                ROCKCHIP_TPL="$GITHUB_WORKSPACE/blobs/ddr.bin" \
-               -j"$(nproc)" 2>&1 | tail -40
+               -j"$(nproc)" 2>&1 | tail -50
 
       - name: Collect artifacts
         run: |
           mkdir -p out
           cd uboot-src
           for f in idbloader.img u-boot.itb u-boot-rockchip.bin u-boot.dtb u-boot.bin spl/u-boot-spl.bin; do
-            [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/out/$(basename $f)"
+            if [ -f "$f" ]; then cp "$f" "$GITHUB_WORKSPACE/out/$(basename $f)"; fi
           done
           cd "$GITHUB_WORKSPACE/out"
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-          echo "--- 产物清单 ---"
           ls -l
+          if ls * >/dev/null 2>&1; then sha256sum * > SHA256SUMS; cat SHA256SUMS; fi
 
       - name: Show sizes
         run: |
