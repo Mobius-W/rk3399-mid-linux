@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * RK3399 MID Board — U-Boot 专用最小设备树
+ *
+ * 血统：Rockchip Sapphire + Excavator 参考设计的定制会议平板
+ * 派生自 mainline arch/arm/dts/rk3399-generic.dts（仅 eMMC/SD/USB/串口）
+ *
+ * 设计原则：
+ *   - U-Boot 阶段只需要「能读 eMMC、能出串口」，其它外设一律不写
+ *   - DDR 初始化交给 Rockchip 官方 rk3399_ddr_800MHz_v1.30.bin（CONFIG_ROCKCHIP_EXTERNAL_TPL）
+ *     ⇒ 本 DTS 不含 rockchip,sdram-params，避免 DDR 参数手写出错
+ *   - 串口降速到 115200：本板 vendor 用 1500000，但移植阶段 115200 兼容性最好
+ *
+ * 硬件依据：armbian/硬件清单-详尽版.md
+ */
+
+/dts-v1/;
+
+#include "rk3399.dtsi"
+
+/ {
+	model = "RK3399 MID Board";
+	compatible = "rockchip,rk3399-mid", "rockchip,rk3399";
+
+	aliases {
+		mmc0 = &sdhci;
+		mmc1 = &sdmmc;
+	};
+
+	chosen {
+		stdout-path = "serial2:115200n8";
+	};
+};
+
+&emmc_phy {
+	status = "okay";
+};
+
+/* eMMC：DG4008 8GB，HS400 ES */
+&sdhci {
+	bus-width = <8>;
+	cap-mmc-highspeed;
+	max-frequency = <150000000>;
+	mmc-hs200-1_8v;
+	mmc-ddr-1_8v;
+	no-sd;
+	no-sdio;
+	non-removable;
+	status = "okay";
+};
+
+/* SD 卡：本板无卡槽，保留控制器但不作为启动源 */
+&sdmmc {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	disable-wp;
+	max-frequency = <150000000>;
+	no-mmc;
+	no-sdio;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc_bus4 &sdmmc_clk &sdmmc_cmd &sdmmc_cd>;
+	status = "okay";
+};
+
+/* 调试串口 UART2 = ff1a0000，GPIO4_C3/C4 */
+&uart2 {
+	status = "okay";
+};
+
+/* USB3 OTG（fe800000）：rockusb / fastboot 下载模式用 */
+&u2phy0 {
+	status = "okay";
+};
+
+&u2phy0_otg {
+	status = "okay";
+};
+
+&usbdrd3_0 {
+	status = "okay";
+};
+
+&usbdrd_dwc3_0 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&u2phy0_otg>;
+	phy-names = "usb2-phy";
+	status = "okay";
+};

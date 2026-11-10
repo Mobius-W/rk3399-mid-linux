@@ -1,0 +1,100 @@
+name: Build RK3399 MID U-Boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      uboot_ref:
+        description: "U-Boot tag/branch"
+        required: false
+        default: "v2026.10"
+      baudrate:
+        description: "UART2 baudrate"
+        required: false
+        default: "115200"
+  push:
+    paths:
+      - "uboot/**"
+      - ".github/workflows/build-uboot.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential gcc-aarch64-linux-gnu bison flex \
+            libssl-dev libgnutls28-dev uuid-dev libgnutls28-dev \
+            python3-setuptools python3-pyelftools python3-dev swig \
+            device-tree-compiler bc
+
+      - name: Fetch U-Boot
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.uboot_ref || 'v2026.10' }}" \
+            https://github.com/u-boot/u-boot.git uboot-src
+          cd uboot-src && git log -1 --oneline
+
+      - name: Fetch Rockchip blobs (DDR + BL31)
+        run: |
+          mkdir -p blobs
+          base=https://raw.githubusercontent.com/rockchip-linux/rkbin/master/bin/rk33
+          curl -fsSL "$base/rk3399_ddr_800MHz_v1.30.bin" -o blobs/ddr.bin
+          curl -fsSL "$base/rk3399_bl31_v1.36.elf"      -o blobs/bl31.elf
+          ls -l blobs/
+          # DDR 固件魔数校验（Rockchip ddr bin 以 'RK33' 开头）
+          xxd -l 8 blobs/ddr.bin
+
+      - name: Install board files
+        run: |
+          cp uboot/rk3399-mid.dts      uboot-src/arch/arm/dts/rk3399-mid.dts
+          cp uboot/rk3399-mid_defconfig uboot-src/configs/rk3399-mid_defconfig
+          # 强制波特率（可被 workflow input 覆盖）
+          sed -i "s/^CONFIG_BAUDRATE=.*/CONFIG_BAUDRATE=${{ github.event.inputs.baudrate || '115200' }}/" \
+            uboot-src/configs/rk3399-mid_defconfig
+          grep -E "DEVICE_TREE|BAUDRATE|EXTERNAL_TPL" uboot-src/configs/rk3399-mid_defconfig
+
+      - name: Configure
+        working-directory: uboot-src
+        run: |
+          make ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- rk3399-mid_defconfig
+          # 打印关键配置，确认 TPL 走外部 blobs
+          grep -E "CONFIG_ROCKCHIP_EXTERNAL_TPL|CONFIG_BAUDRATE|CONFIG_DEFAULT_DEVICE_TREE" .config
+
+      - name: Build
+        working-directory: uboot-src
+        run: |
+          make ARCH=arm CROSS_COMPILE=aarch64-linux-gnu- \
+               BL31="$GITHUB_WORKSPACE/blobs/bl31.elf" \
+               ROCKCHIP_TPL="$GITHUB_WORKSPACE/blobs/ddr.bin" \
+               -j"$(nproc)" 2>&1 | tail -40
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cd uboot-src
+          for f in idbloader.img u-boot.itb u-boot-rockchip.bin u-boot.dtb u-boot.bin spl/u-boot-spl.bin; do
+            [ -f "$f" ] && cp "$f" "$GITHUB_WORKSPACE/out/$(basename $f)"
+          done
+          cd "$GITHUB_WORKSPACE/out"
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          echo "--- 产物清单 ---"
+          ls -l
+
+      - name: Show sizes
+        run: |
+          cd out
+          for f in idbloader.img u-boot.itb u-boot-rockchip.bin; do
+            [ -f "$f" ] && printf "%-22s %10d bytes\n" "$f" "$(stat -c%s $f)"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rk3399-mid-uboot
+          path: out/*
+          retention-days: 30
