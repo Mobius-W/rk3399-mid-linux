@@ -35,23 +35,29 @@ jobs:
           aarch64-linux-gnu-gcc --version | head -1
 
       # ---------- 先做快的：busybox + initramfs ----------
-      - name: Build static busybox
+      - name: Fetch static busybox (Alpine, arm64/musl)
         run: |
           set -euo pipefail
-          curl -sSL --retry 3 -o busybox.tar.bz2 https://busybox.net/downloads/busybox-1.36.1.tar.bz2
-          tar xf busybox.tar.bz2
-          cd busybox-1.36.1
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-          sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          grep -q '^CONFIG_STATIC=y' .config || { echo "STATIC 未启用"; exit 1; }
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" 2>&1 | tail -15
-          file busybox
+          DIR=https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/
+          APK=$(curl -sSL "$DIR" | grep -oE 'busybox-static-[0-9.]+-r[0-9]+\.apk' | head -1)
+          echo "APK=$APK"
+          [ -n "$APK" ] || { echo "找不到 busybox-static"; exit 1; }
+          curl -sSL -o bb.apk "$DIR$APK"
+          rm -rf bbroot && mkdir -p bbroot
+          tar -xzf bb.apk -C bbroot 2>/dev/null || tar -xf bb.apk -C bbroot
+          find bbroot -type f | head -20
+          BB=$(find bbroot -type f -name 'busybox*' | head -1)
+          echo "BB=$BB"
+          cp "$BB" busybox.arm64
+          chmod +x busybox.arm64
+          file busybox.arm64
+          ./busybox.arm64 2>/dev/null | head -2 || true
 
       - name: Assemble initramfs
         run: |
           set -euo pipefail
           rm -rf irfs && mkdir -p irfs/bin irfs/proc irfs/sys irfs/dev irfs/tmp irfs/etc
-          cp busybox-1.36.1/busybox irfs/bin/busybox
+          cp busybox.arm64 irfs/bin/busybox
           cp linux/initramfs/init irfs/init
           cp linux/initramfs/udhcpc.script irfs/bin/udhcpc.script
           chmod +x irfs/init irfs/bin/udhcpc.script
