@@ -26,8 +26,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update -o Acquire::Retries=3 --no-progress
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -q update
+          sudo apt-get -q install -y --no-install-recommends \
             build-essential bison flex libssl-dev swig bc \
             device-tree-compiler python3-setuptools python3-pyelftools \
             gcc-aarch64-linux-gnu
