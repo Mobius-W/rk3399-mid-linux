@@ -18,26 +18,30 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential gcc-aarch64-linux-gnu bison flex \
-            libssl-dev libgnutls28-dev uuid-dev libgnutls28-dev \
-            python3-setuptools python3-pyelftools python3-dev swig \
-            device-tree-compiler bc
+          sudo apt-get update -o Acquire::Retries=3 --no-progress
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex libssl-dev swig bc \
+            device-tree-compiler python3-setuptools python3-pyelftools \
+            gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -1
 
       - name: Fetch U-Boot
         run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.uboot_ref || 'v2026.10' }}" \
-            https://github.com/u-boot/u-boot.git uboot-src
-          cd uboot-src && git log -1 --oneline
+          REF="${{ github.event.inputs.uboot_ref || 'v2026.10' }}"
+          echo "U-Boot ref: $REF"
+          curl -fsSL "https://github.com/u-boot/u-boot/archive/refs/tags/${REF}.tar.gz" -o u-boot.tar.gz
+          mkdir -p uboot-src
+          tar xzf u-boot.tar.gz -C uboot-src --strip-components=1
+          du -sh uboot-src
+          head -3 uboot-src/Makefile
 
       - name: Fetch Rockchip blobs (DDR + BL31)
         run: |
