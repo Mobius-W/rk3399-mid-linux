@@ -1,0 +1,18 @@
+#!/bin/sh
+# busybox udhcpc 回调：最小可用实现
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface" 2>/dev/null
+    ip link set "$interface" up 2>/dev/null
+    ;;
+  bound|renew)
+    ip addr flush dev "$interface" 2>/dev/null
+    ip addr add "$ip/$mask" dev "$interface"
+    [ -n "$router" ] && for r in $router; do ip route add default via "$r" dev "$interface" 2>/dev/null; break; done
+    if [ -n "$dns" ]; then
+      : > /etc/resolv.conf
+      for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf; done
+    fi
+    ;;
+esac
+exit 0

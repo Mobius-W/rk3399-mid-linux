@@ -1,0 +1,64 @@
+#!/bin/sh
+# RK3399 MID — 无 TTL 探路 initramfs
+# 目的：内核一起来就通过以太网自播报 + 开 telnet 不依赖串口
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+/bin/busybox --install -s /bin 2>/dev/null
+
+mount -t proc     proc     /proc        2>/dev/null
+mount -t sysfs    sysfs    /sys         2>/dev/null
+mount -t devtmpfs devtmpfs /dev         2>/dev/null
+mkdir -p /dev/pts /tmp /run /root
+mount -t devpts   devpts   /dev/pts     2>/dev/null
+
+BEACON=10.26.88.11
+PORT=9999
+
+{
+  echo "=== RK3399 MID initramfs ==="
+  uname -a
+  echo "--- cmdline ---"
+  cat /proc/cmdline
+  echo "--- block ---"
+  ls /dev/mmcblk* 2>/dev/null
+  cat /proc/partitions
+  echo "--- net ---"
+  ls /sys/class/net
+} > /tmp/boot.txt 2>&1
+cat /tmp/boot.txt > /dev/console 2>/dev/null
+cat /tmp/boot.txt > /dev/ttyS2 2>/dev/null
+
+# ---- 网络 ----
+if [ -e /sys/class/net/eth0 ]; then
+  ip link set eth0 up 2>/dev/null
+  for i in 1 2 3 4 5 6 7 8; do
+    udhcpc -i eth0 -n -q -t 3 -T 3 -s /bin/udhcpc.script && break
+    sleep 2
+  done
+fi
+
+# ---- UDP 自播报（外网也能看到它活没活）----
+(
+  while true; do
+    IP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}')
+    MAC=$(cat /sys/class/net/eth0/address 2>/dev/null)
+    BLK=$(ls /dev/mmcblk* 2>/dev/null | tr '\n' ',')
+    K=$(uname -r)
+    printf 'RK3399MID|ip=%s|mac=%s|k=%s|blk=%s\n' "$IP" "$MAC" "$K" "$BLK" \
+      | nc -u -w 1 "$BEACON" "$PORT" 2>/dev/null
+    sleep 3
+  done
+) &
+
+# ---- telnet 后台（22/telnet 23）----
+telnetd -l /bin/sh -p 23 2>/dev/null &
+telnetd -l /bin/sh -p 2323 2>/dev/null &
+
+# ---- 串口 shell（万一 TTL 接了也能用）----
+if [ -c /dev/ttyS2 ]; then
+  setsid sh -c 'exec sh </dev/ttyS2 >/dev/ttyS2 2>&1' &
+fi
+
+echo "*** RK3399 MID: netconsole ready, telnet on 23, beacon -> $BEACON:$PORT ***" > /dev/console
+
+# 前台留一个 shell，方便后续改成 switch_root
+exec sh

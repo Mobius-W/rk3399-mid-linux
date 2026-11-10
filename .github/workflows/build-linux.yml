@@ -1,0 +1,110 @@
+name: Build RK3399 MID Linux (kernel + initramfs + boot.img)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: "内核版本（kernel.org v6.x 目录下的版本号，例如 6.12）"
+        required: false
+        default: "6.12"
+  push:
+    paths:
+      - "linux/**"
+      - "tools/**"
+      - ".github/workflows/build-linux.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -q update
+          sudo apt-get -q install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler cpio xz-utils curl ca-certificates \
+            aarch64-linux-gnu-gcc
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Fetch kernel
+        run: |
+          set -euo pipefail
+          KREF="${{ github.event.inputs.kernel_ref || '6.12' }}"
+          echo "KREF=$KREF" >> $GITHUB_ENV
+          curl -sSL --retry 3 -o linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KREF}.tar.xz"
+          ls -l linux.tar.xz
+          tar xf linux.tar.xz
+          mv "linux-${KREF}" ksrc
+          cd ksrc && head -5 Makefile
+
+      - name: Apply board DTS
+        run: |
+          set -euo pipefail
+          D=ksrc/arch/arm64/boot/dts/rockchip
+          cp linux/rk3399-mid.dts "$D/rk3399-mid.dts"
+          echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-mid.dtb' >> "$D/Makefile"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd ksrc
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          scripts/kconfig/merge_config.sh -m .config "$GITHUB_WORKSPACE/linux/config.fragment"
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep -E "CONFIG_DWMAC_ROCKCHIP|CONFIG_MMC_SDHCI_OF_ARASAN|CONFIG_DRM_ROCKCHIP|CONFIG_SERIAL_8250_DW" .config
+
+      - name: Build kernel + dtbs
+        run: |
+          set -euo pipefail
+          cd ksrc
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image dtbs 2>&1 | tail -40
+          ls -l arch/arm64/boot/Image arch/arm64/boot/dts/rockchip/rk3399-mid.dtb
+
+      - name: Build static busybox
+        run: |
+          set -euo pipefail
+          curl -sSL --retry 3 -o busybox.tar.bz2 https://busybox.net/downloads/busybox-1.36.1.tar.bz2
+          tar xf busybox.tar.bz2
+          cd busybox-1.36.1
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          grep '^CONFIG_STATIC=y' .config
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" 2>&1 | tail -20
+          file busybox
+
+      - name: Assemble initramfs
+        run: |
+          set -euo pipefail
+          rm -rf irfs && mkdir -p irfs/bin irfs/proc irfs/sys irfs/dev irfs/tmp irfs/etc
+          cp busybox-1.36.1/busybox irfs/bin/busybox
+          cp linux/initramfs/init irfs/init
+          cp linux/initramfs/udhcpc.script irfs/bin/udhcpc.script
+          chmod +x irfs/init irfs/bin/udhcpc.script
+          ( cd irfs && find . | cpio -o -H newc --owner=0:0 --reproducible 2>/dev/null | gzip -9 ) > initramfs.cpio.gz
+          ls -l initramfs.cpio.gz
+
+      - name: Pack boot.img
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 tools/mkbootimg.py \
+            --kernel ksrc/arch/arm64/boot/Image \
+            --ramdisk initramfs.cpio.gz \
+            --name rk3399-mid \
+            --cmdline "console=ttyS2,1500000n8 earlycon=uart8250,mmio32,0xff1a0000 root=/dev/ram0 rw init=/init loglevel=7 coherent_pool=2M" \
+            -o out/boot.img
+          cp ksrc/arch/arm64/boot/Image out/Image
+          cp ksrc/arch/arm64/boot/dts/rockchip/rk3399-mid.dtb out/rk3399-mid.dtb
+          cp initramfs.cpio.gz out/initramfs.cpio.gz
+          cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS && ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rk3399-mid-linux
+          path: out/*
+          if-no-files-found: error

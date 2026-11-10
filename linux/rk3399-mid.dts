@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * RK3399 MID Board (rockchip,rk3399-mid)
+ *
+ * 血统：Rockchip Sapphire + Excavator 参考设计定制版
+ *   - 基础 = mainline rk3399-sapphire.dtsi（SoC 层 + PMIC + GMAC + eMMC/SD 全复用）
+ *   - 本板 delta = eDP 1920x1080 屏 + Goodix GT9xx 触摸 + ES8316 音频 + CW2015 电池
+ *
+ * 依据：vendor DTB（resource.img 抽出，rk3399-mid-stock.dtb）逐项反编译比对
+ * 生成：2026-11-10
+ *
+ * ⚠️ 待实测校准项（首次启动后需验证）：
+ *   1. 触摸坐标范围（vendor 报 max-x=1536 / max-y=2048，需确认旋转方向）
+ *   2. adc-keys 电压阈值（vendor 用 rockchip,adc_value 原始值，此处暂用 excavator 值）
+ *   3. GMAC tx/rx delay（vendor 45/34，sapphire 默认 40/17，先按 vendor）
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include "rk3399-sapphire.dtsi"
+
+/ {
+	model = "RK3399 MID Board";
+	compatible = "rockchip,rk3399-mid", "rockchip,rk3399";
+
+	aliases {
+		mmc2 = &sdio0;
+	};
+
+	/*
+	 * 按键：本板用 rockchip,key（adc）驱动。
+	 * mainline 对应 adc-keys，阈值暂用 excavator 官方值，待实测校准。
+	 */
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 1>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		poll-interval = <100>;
+
+		button-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			press-threshold-microvolt = <100000>;
+		};
+
+		button-down {
+			label = "Volume Down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			press-threshold-microvolt = <300000>;
+		};
+
+		button-back {
+			label = "Back";
+			linux,code = <KEY_BACK>;
+			press-threshold-microvolt = <985000>;
+		};
+
+		button-menu {
+			label = "Menu";
+			linux,code = <KEY_MENU>;
+			press-threshold-microvolt = <1314000>;
+		};
+	};
+
+	/*
+	 * 背光：vendor  pwms=<&pwm0 0 25000 0>  enable-gpios=<&gpio1 RK_PB5 ACTIVE_HIGH>
+	 * 与 excavator 完全一致。
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		brightness-levels = <
+			  0   1   2   3   4   5   6   7
+			  8   9  10  11  12  13  14  15
+			 16  17  18  19  20  21  22  23
+			 24  25  26  27  28  29  30  31
+			 32  33  34  35  36  37  38  39
+			 40  41  42  43  44  45  46  47
+			 48  49  50  51  52  53  54  55
+			 56  57  58  59  60  61  62  63
+			 64  65  66  67  68  69  70  71
+			 72  73  74  75  76  77  78  79
+			 80  81  82  83  84  85  86  87
+			 88  89  90  91  92  93  94  95
+			 96  97  98  99 100 101 102 103
+			104 105 106 107 108 109 110 111
+			112 113 114 115 116 117 118 119
+			120 121 122 123 124 125 126 127
+			128 129 130 131 132 133 134 135
+			136 137 138 139 140 141 142 143
+			144 145 146 147 148 149 150 151
+			152 153 154 155 156 157 158 159
+			160 161 162 163 164 165 166 167
+			168 169 170 171 172 173 174 175
+			176 177 178 179 180 181 182 183
+			184 185 186 187 188 189 190 191
+			192 193 194 195 196 197 198 199
+			200 201 202 203 204 205 206 207
+			208 209 210 211 212 213 214 215
+			216 217 218 219 220 221 222 223
+			224 225 226 227 228 229 230 231
+			232 233 234 235 236 237 238 239
+			240 241 242 243 244 245 246 247
+			248 249 250 251 252 253 254 255>;
+		default-brightness-level = <200>;
+		enable-gpios = <&gpio1 RK_PB5 GPIO_ACTIVE_HIGH>;
+		pwms = <&pwm0 0 25000 0>;
+		status = "okay";
+	};
+
+	/*
+	 * eDP 面板：
+	 *   vendor  display-timings timing0（1920x1080@60Hz）
+	 *     clock=138500000, hactive=1920, hfp=120, hbp=32, hsync=8
+	 *     vactive=1080, vfp=23, vbp=6, vsync=2
+	 *   全部极性 active-low（vendor 值 0x00）
+	 *   复位脚：vendor lcd_rst = gpio3 RK_PA4
+	 *   power-supply：暂用 vcc3v3_s0（与 excavator 一致）
+	 */
+	edp_panel: edp-panel {
+		compatible = "simple-panel";
+		backlight = <&backlight>;
+		power-supply = <&vcc3v3_s0>;
+		enable-gpios = <&gpio3 RK_PA4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_panel_reset>;
+
+		display-timings {
+			native-mode = <&panel_timing>;
+
+			panel_timing: timing0 {
+				clock-frequency = <138500000>;
+				hactive = <1920>;
+				hfront-porch = <120>;
+				hback-porch = <32>;
+				hsync-len = <8>;
+				vactive = <1080>;
+				vfront-porch = <23>;
+				vback-porch = <6>;
+				vsync-len = <2>;
+				hsync-active = <0>;
+				vsync-active = <0>;
+				de-active = <0>;
+				pixelclk-active = <0>;
+			};
+		};
+
+		port {
+			panel_in_edp: endpoint {
+				remote-endpoint = <&edp_out_panel>;
+			};
+		};
+	};
+
+	/*
+	 * 音频：ES8316 @ i2c1 0x11（vendor 实测）
+	 *   vendor 还有 es7243@0x10 / es7243@0x12（麦克风阵列 ADC），mainline 无驱动，先不挂。
+	 */
+	es8316_sound: es8316-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,es8316-codec";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,widgets =
+			"Microphone", "Mic Jack",
+			"Headphone", "Headphone Jack",
+			"Speaker", "Speaker";
+		simple-audio-card,routing =
+			"Mic Jack", "MICBIAS1",
+			"IN1P", "Mic Jack",
+			"Headphone Jack", "HPOL",
+			"Headphone Jack", "HPOR",
+			"Speaker", "SPKOL",
+			"Speaker", "SPKOR";
+
+		simple-audio-card,cpu {
+			sound-dai = <&i2s0>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&es8316>;
+		};
+	};
+
+	/* SDIO WiFi 电源序列（vendor reset-gpios = gpio0 RK_PB2 ACTIVE_LOW） */
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&rk808 1>;
+		clock-names = "ext_clock";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		reset-gpios = <&gpio0 RK_PB2 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/* ---------------- eDP ---------------- */
+&edp {
+	pinctrl-names = "default";
+	pinctrl-0 = <&edp_hpd>;
+	status = "okay";
+};
+
+&edp_out {
+	edp_out_panel: endpoint {
+		remote-endpoint = <&panel_in_edp>;
+	};
+};
+
+/* ---------------- I2C1：ES8316 音频 ---------------- */
+&i2c1 {
+	i2c-scl-rising-time-ns = <300>;
+	i2c-scl-falling-time-ns = <15>;
+	status = "okay";
+
+	es8316: es8316@11 {
+		compatible = "everest,es8316";
+		reg = <0x11>;
+		clocks = <&cru SCLK_I2S_8CH_OUT>;
+		clock-names = "mclk";
+		#sound-dai-cells = <0>;
+		spk-con-gpio = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>;
+		amp-en-gpio = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* ---------------- I2C2：Goodix GT9xx 触摸 ---------------- */
+&i2c2 {
+	i2c-scl-rising-time-ns = <150>;
+	i2c-scl-falling-time-ns = <20>;
+	status = "okay";
+
+	touchscreen@5d {
+		compatible = "goodix,gt911";
+		reg = <0x5d>;
+		interrupt-parent = <&gpio2>;
+		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+		irq-gpios = <&gpio2 RK_PA7 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio4 RK_PC6 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_int &lcd_panel_reset>;
+		touchscreen-size-x = <1920>;
+		touchscreen-size-y = <1080>;
+		status = "okay";
+	};
+};
+
+/* ---------------- I2C4：CW2015 电量计 + 充电检测 ---------------- */
+&i2c4 {
+	i2c-scl-rising-time-ns = <345>;
+	i2c-scl-falling-time-ns = <11>;
+	clock-frequency = <100000>;
+	status = "okay";
+
+	fuel-gauge@62 {
+		compatible = "cellwise,cw2015";
+		reg = <0x62>;
+		cellwise,battery-profile = /bits/ 8 <
+			0x15 0x7e 0x67 0x59 0x3e 0x49 0x5b 0x63
+			0x5a 0x4e 0x49 0x4a 0x50 0x5c 0x67 0x65
+			0x56 0x49 0x44 0x42 0x41 0x42 0x46 0x4f
+			0x58 0x60 0x0b 0x85 0x4b 0x76 0x8d 0xa1
+			0xae 0xaf 0xb2 0xb8 0x36 0x0e 0x64 0x01
+			0x01 0x3b 0x38 0x6b 0x73 0x9a 0x9b 0x0f
+			0x26 0x70 0xa2 0xc3 0x80 0xbf 0x94 0xcb
+			0x2f 0x7d 0x72 0xa5 0xb5 0xc1 0x58 0xc9>;
+		cellwise,monitor-interval-ms = <2000>;
+	};
+};
+
+/* ---------------- 音频 I2S ---------------- */
+&i2s0 {
+	rockchip,playback-channels = <8>;
+	rockchip,capture-channels = <8>;
+	status = "okay";
+};
+
+/* ---------------- 显示 ---------------- */
+&vopb {
+	status = "okay";
+};
+
+&vopb_mmu {
+	status = "okay";
+};
+
+&vopl {
+	status = "okay";
+};
+
+&vopl_mmu {
+	status = "okay";
+};
+
+/* ---------------- pinctrl ---------------- */
+&pinctrl {
+	sdio-pwrseq {
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <0 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	lcd-panel {
+		lcd_panel_reset: lcd-panel-reset {
+			rockchip,pins = <3 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	touch {
+		touch_int: touch-int {
+			rockchip,pins = <2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};
+
+/* ---------------- SDIO WiFi ---------------- */
+&sdio0 {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	clock-frequency = <50000000>;
+	keep-power-in-suspend;
+	max-frequency = <50000000>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdio0_bus4 &sdio0_cmd &sdio0_clk>;
+	sd-uhs-sdr104;
+	status = "okay";
+};
+
+/* ---------------- GMAC：vendor tx_delay=45 / rx_delay=34 ---------------- */
+&gmac {
+	tx_delay = <0x2d>;
+	rx_delay = <0x22>;
+};
+
+/* ---------------- 关闭本板不存在的设备 ---------------- */
+&pcie_phy {
+	status = "disabled";
+};
+
+&pcie0 {
+	status = "disabled";
+};
+
+/* 本板无 HDMI 输出（会议一体机，只有 eDP 内屏） */
+&hdmi {
+	status = "disabled";
+};
+
+&hdmi_sound {
+	status = "disabled";
+};
+
+/* 背光 PWM 输出脚 */
+&pwm0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm0_pin>;
+	status = "okay";
+};
+
+&spdif {
+	status = "okay";
+};
