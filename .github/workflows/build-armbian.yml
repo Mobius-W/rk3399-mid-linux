@@ -1,0 +1,159 @@
+name: Build Armbian image (RK3399-MID)
+
+# 在 GitHub Actions 上用官方 armbian/build 源码编译 RK3399-MID 的完整 Armbian 镜像。
+# 官方编译容器镜像：ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
+# 板级配置来源：本仓库 armbian/userpatches/（免 fork armbian/build）
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "用户空间发行版"
+        required: false
+        default: "noble"
+        type: choice
+        options: [noble, trixie, bookworm]
+      desktop:
+        description: "是否构建桌面版（默认 minimal CLI）"
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - "armbian/**"
+      - ".github/workflows/build-armbian.yml"
+    branches: [main]
+
+concurrency:
+  group: armbian-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Armbian rk3399-mid (${{ inputs.release || 'noble' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      # ---------- 1. 取源码 ----------
+      - name: Checkout this repo (customisations)
+        uses: actions/checkout@v4
+        with:
+          path: custom
+          fetch-depth: 1
+
+      - name: Checkout Armbian build framework
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref: main
+          path: build
+          fetch-depth: 1
+
+      - name: Checkout Armbian os (userspace / packages)
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/os
+          path: os
+          fetch-depth: 1
+
+      # ---------- 2. 拼 userpatches ----------
+      - name: Prepare userpatches
+        run: |
+          set -euo pipefail
+          mkdir -pv build/userpatches
+          if [ -d os/userpatches ]; then
+            rsync -a os/userpatches/ build/userpatches/
+          fi
+          rsync -a custom/armbian/userpatches/ build/userpatches/
+          echo "=== userpatches 清单 ==="
+          find build/userpatches -type f | sort
+          echo
+          echo "=== 板级配置 ==="
+          cat build/userpatches/config/boards/rk3399-mid.csc | head -40
+
+      # ---------- 3. 主机依赖 ----------
+      - name: Install build requirements
+        run: |
+          set -euo pipefail
+          cd build
+          sudo ./compile.sh requirements
+          sudo chown -R "$USER:$USER" .
+
+      # ---------- 4. 编译 ----------
+      - name: Build Armbian image
+        run: |
+          set -euo pipefail
+          cd build
+          ./compile.sh build \
+            BOARD=rk3399-mid \
+            BRANCH=current \
+            RELEASE="${{ inputs.release || 'noble' }}" \
+            BUILD_DESKTOP="${{ inputs.desktop && 'yes' || 'no' }}" \
+            BUILD_MINIMAL="${{ inputs.desktop && 'no' || 'yes' }}" \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=img \
+            SHARE_LOG=yes \
+            EXPERT=yes
+
+      # ---------- 5. 产物自检 ----------
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          cd build
+          echo "=== output/images ==="
+          ls -la output/images/ || true
+          echo
+          echo "=== output/debs / u-boot 产物 ==="
+          find output -maxdepth 3 -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) -exec ls -la {} \; || true
+
+          # 板级引导件在 build/cache/u-boot/... 下，这里按 armbian 的实际输出路径找
+          UB=$(find output -type f -name 'uboot.img' | head -1 || true)
+          TR=$(find output -type f -name 'trust.bin' | head -1 || true)
+          for f in "$UB" "$TR"; do
+            [ -n "$f" ] || continue
+            echo "--- $f"
+            xxd -l 32 "$f"
+          done
+
+          IMG=$(ls output/images/*.img 2>/dev/null | head -1 || true)
+          if [ -n "$IMG" ]; then
+            echo "=== $IMG 关键扇区魔数 ==="
+            python3 - "$IMG" <<'PY'
+          import sys, os
+          p = sys.argv[1]
+          f = open(p, "rb")
+          def peek(lba, n=32):
+              f.seek(lba*512); return f.read(n)
+          checks = [
+              (0,     "PARM / MBR 区"),
+              (1,     "GPT 头区"),
+              (64,    "idbloader 区（本板不写）"),
+              (8192,  "LOADER (uboot.img)"),
+              (16384, "BL3X  (trust.bin)"),
+              (24576, "trust 备用区"),
+              (32768, "p1 起点"),
+          ]
+          for lba, name in checks:
+              d = peek(lba)
+              txt = "".join(chr(b) if 32 <= b < 127 else "." for b in d)
+              print(f"  LBA {lba:>6}  {name:<24} {d[:8].hex(' ')}  {txt[:8]}")
+          print(f"  image size = {os.path.getsize(p)/1048576:.1f} MiB")
+          PY
+          fi
+
+      # ---------- 6. 上传 ----------
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find build/output/images -maxdepth 1 -type f -exec cp -a {} out/ \; || true
+          find build/output/debs -maxdepth 2 -type f -name '*.deb' -exec cp -a {} out/ \; || true
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: armbian-rk3399-mid-${{ github.run_number }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
