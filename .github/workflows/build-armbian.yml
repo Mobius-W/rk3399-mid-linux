@@ -21,6 +21,7 @@ on:
   push:
     paths:
       - "armbian/**"
+      - "tools/mk-parm-variant.py"
       - ".github/workflows/build-armbian.yml"
     branches: [main]
 
@@ -69,8 +70,8 @@ jobs:
           echo "=== userpatches 清单 ==="
           find build/userpatches -type f | sort
           echo
-          echo "=== 板级配置 ==="
-          cat build/userpatches/config/boards/rk3399-mid.csc | head -40
+          echo "=== 板级配置（前 40 行） ==="
+          head -40 build/userpatches/config/boards/rk3399-mid.csc
 
       # ---------- 3. 主机依赖 ----------
       - name: Install build requirements
@@ -104,15 +105,25 @@ jobs:
           echo "=== output/images ==="
           ls -la output/images/ || true
           echo
-          echo "=== output/debs / u-boot 产物 ==="
-          find output -maxdepth 3 -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) -exec ls -la {} \; || true
+          echo "=== armbian u-boot deb ==="
+          ls -la output/debs/*u-boot* 2>/dev/null || true
 
-          # 板级引导件在 build/cache/u-boot/... 下，这里按 armbian 的实际输出路径找
-          UB=$(find output -type f -name 'uboot.img' | head -1 || true)
-          TR=$(find output -type f -name 'trust.bin' | head -1 || true)
-          for f in "$UB" "$TR"; do
-            [ -n "$f" ] || continue
-            echo "--- $f"
+          # armbian 把 uboot.img / trust.bin 打进 linux-u-boot-<board>-<branch>.deb，
+          # 解出来才能看魔数、也才能作为单独产物留存。
+          mkdir -p ubootpkg
+          for DEB in output/debs/linux-u-boot-rk3399-mid-*.deb; do
+            [ -e "$DEB" ] || continue
+            echo "--- 解包 $DEB"
+            dpkg-deb -x "$DEB" ubootpkg
+          done
+
+          echo
+          echo "=== 引导件 ==="
+          find ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) \
+            -exec ls -la {} \; || true
+
+          for f in $(find ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' \) | sort); do
+            echo "--- $f  (头 32B)"
             xxd -l 32 "$f"
           done
 
@@ -123,8 +134,11 @@ jobs:
           import sys, os
           p = sys.argv[1]
           f = open(p, "rb")
+
           def peek(lba, n=32):
-              f.seek(lba*512); return f.read(n)
+              f.seek(lba*512)
+              return f.read(n)
+
           checks = [
               (0,     "PARM / MBR 区"),
               (1,     "GPT 头区"),
@@ -142,13 +156,63 @@ jobs:
           PY
           fi
 
-      # ---------- 6. 上传 ----------
+      # ---------- 6. 生成「保留原厂 PARM」变体 ----------
+      # 本板 boot0 miniloader 靠 user 区 LBA0 的 Rockchip parameter 里的 mtdparts
+      # 定位 uboot@0x2000 / trust@0x4000；而 GPT 会同时占用 LBA0(MBR) 与 LBA1(GPT 头)。
+      # 变体把 parameter 压到 446 B、MBR 分区表放 446..511、并抹掉 GPT 头/表。
+      # 这一步失败不应阻断主产物上传，所以不用 set -e。
+      - name: Build PARM-preserving variant
+        run: |
+          set -uo pipefail
+          IMG=$(ls -1 build/output/images/*.img 2>/dev/null | head -1 || true)
+          if [ -z "$IMG" ]; then
+            echo "::warning::没有找到 .img，跳过 PARM 变体"
+            exit 0
+          fi
+          OUT="${IMG%.img}-parm.img"
+          echo "输入: $IMG"
+          echo "输出: $OUT"
+          if ! python3 custom/tools/mk-parm-variant.py "$IMG" "$OUT"; then
+            echo "::warning::mk-parm-variant.py 失败（主产物不受影响）"
+            exit 0
+          fi
+          echo "=== 变体校验 ==="
+          python3 - "$OUT" <<'PY'
+          import struct, sys, os
+          S = 512
+          f = open(sys.argv[1], "rb")
+          l0 = f.read(S)
+          print("  LBA0 magic    :", l0[:4])
+          size = struct.unpack_from("<I", l0, 4)[0]
+          print("  PARM 长度     :", size, "字节（必须 <= 446）")
+          for i in range(4):
+              e = l0[446+i*16:462+i*16]
+              if e == b"\x00"*16:
+                  continue
+              first, cnt = struct.unpack_from("<II", e, 8)
+              print(f"  MBR slot{i+1}    : type=0x{e[4]:02x} first={first} count={cnt} last={first+cnt-1}")
+          print("  MBR 签名      :", l0[510:512].hex())
+          f.seek(S)
+          print("  LBA1 (GPT 头) :", f.read(8))
+          print("  镜像大小      : %.1f MiB" % (os.path.getsize(sys.argv[1])/1048576))
+          PY
+
+      # ---------- 7. 收集产物 ----------
       - name: Collect artifacts
         run: |
           set -euo pipefail
           mkdir -p out
           find build/output/images -maxdepth 1 -type f -exec cp -a {} out/ \; || true
           find build/output/debs -maxdepth 2 -type f -name '*.deb' -exec cp -a {} out/ \; || true
+          # 引导件单独取出来：刷机要按 LBA 坐标分件写，不能整盘覆盖
+          for f in $(find build/ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) 2>/dev/null); do
+            cp -a "$f" "out/boot-$(basename "$f")"
+          done
+          # 确认本板 DTB 真的被注入并编译出来了
+          for f in $(find build -path '*boot/dts/rockchip/rk3399-mid.dtb' 2>/dev/null | head -3); do
+            cp -a "$f" out/ 2>/dev/null || true
+          done
+          echo "=== out/ ==="
           ls -la out/
 
       - uses: actions/upload-artifact@v4

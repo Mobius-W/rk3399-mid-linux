@@ -36,6 +36,17 @@
 #     补丁目录用官方 patch/u-boot/v2026.10。该目录带 0000.patching_config.yaml，
 #     支持把 defconfig / dts 直接拷进 u-boot 源码树。
 #
+#  6b. ★ trust.ini 必须自己带：rockchip64 家族的默认补丁目录是
+#        BOOTPATCHDIR="${BOOTPATCHDIR:-"u-boot-rockchip64"}"   (rockchip64_common.inc:22)
+#      官方 add-trust-ini.patch（298 B，只是新增一个 15 行的 trust.ini）就放在
+#      patch/u-boot/u-boot-rockchip64/ 里；一旦把 BOOTPATCHDIR 覆写成 v2026.10，
+#      这个补丁就不在列表内了，于是 only-blobs 后处理
+#        trust_merger --replace bl31.elf <BL31_BLOB> trust.ini
+#     会以 "config(trust.ini) not found! merge failed!" 失败（2026-11-11 CI 实测）。
+#      注意 u-boot-rockchip64/ 里另外 47 个补丁是给家族默认 v2022.07 用的，
+#      不能整体带进来（BOOTBRANCH 默认是 tag:v2022.07，见 common.conf:189）。
+#      => 只在 userpatches/u-boot/v2026.10/ 补一个同名补丁，内容与官方逐字节一致。
+#
 #  7. ★ U-Boot 的文件系统能力不是靠 defconfig 显式开启的，而是靠 Kconfig 依赖链：
 #         CONFIG_ROCKCHIP_RK3399=y
 #           -> imply BOOTSTD_FULL            (arch/arm/mach-rockchip/Kconfig:280)
@@ -217,8 +228,12 @@ function post_config_uboot_target__rk3399mid_uboot_features() {
 	run_host_command_logged scripts/config --enable CONFIG_CMD_MMC
 	run_host_command_logged scripts/config --enable CONFIG_CMD_GPT
 
-	# 让 U-Boot 自己也认识本板设备树（被 armbianEnv.txt 的 fdtfile 覆盖，但不影响自身初始化）
-	[[ -n "${BOOT_FDT_FILE:-}" ]] && run_host_command_logged scripts/config --set-str DEFAULT_FDT_FILE "${BOOT_FDT_FILE}"
+	# ★ 不要改 DEFAULT_FDT_FILE！
+	#   U-Boot 内嵌 DTB 是 evb-rk3399_defconfig 自带的 rockchip/rk3399-evb.dtb，
+	#   u-boot 源码树里并不存在 rk3399-mid.dtb；把它指过去会让 U-Boot 自身
+	#   FDT 加载失败（u-boot-dtb.bin 的 CAT 阶段就崩）。
+	#   内核用的 DTB 由 armbianEnv.txt 的 fdtfile=rockchip/rk3399-mid.dtb 覆盖，
+	#   与 U-Boot 内嵌 DTB 无关，两者互不影响。
 
 	return 0
 }
